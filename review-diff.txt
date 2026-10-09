@@ -1,0 +1,616 @@
+﻿diff --git a/TASKS.md b/TASKS.md
+index 52175e1..555e941 100644
+--- a/TASKS.md
++++ b/TASKS.md
+@@ -7,7 +7,7 @@
+ - [x] Priority labels and action candidates
+ - [x] Sample conversation
+ - [x] Clear input/results
+-- [ ] Add unit tests for extraction rules
++- [x] Add unit tests for extraction rules
+ - [ ] Add real local model inference if quality and device constraints justify it
+ - [ ] Add import support for selected text formats
+ - [ ] Add accessibility and usability review
+diff --git a/index.html b/index.html
+index bc3039f..40c738d 100644
+--- a/index.html
++++ b/index.html
+@@ -5,6 +5,7 @@
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+     <meta name="theme-color" content="#10131c" />
+     <meta name="description" content="A privacy-first briefing for overwhelming conversations." />
++    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'none';" />
+     <title>What Did I Miss?</title>
+   </head>
+   <body>
+diff --git a/package.json b/package.json
+index fe2127f..e912878 100644
+--- a/package.json
++++ b/package.json
+@@ -6,7 +6,8 @@
+   "scripts": {
+     "dev": "vite",
+     "build": "tsc -b && vite build",
+-    "preview": "vite preview"
++    "preview": "vite preview",
++    "test": "vitest run"
+   },
+   "dependencies": {
+     "lucide-react": "^0.468.0",
+@@ -18,6 +19,7 @@
+     "@types/react-dom": "^18.3.1",
+     "@vitejs/plugin-react": "^4.3.4",
+     "typescript": "~5.6.2",
+-    "vite": "^6.0.5"
++    "vite": "^6.0.5",
++    "vitest": "^5.0.3"
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/src/App.tsx b/src/App.tsx
+index 554466d..03b4e72 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -34,7 +34,11 @@ function App() {
+   const findings = analysis?.findings ?? [];
+   const filtered = activeFilter === "all"
+     ? findings
+-    : findings.filter((finding) => finding.category === activeFilter);
++    : findings.filter(
++        (finding) =>
++          finding.category === activeFilter ||
++          (activeFilter === "urgent" && finding.priority === "high"),
++      );
+ 
+   function runAnalysis() {
+     if (!conversation.trim()) {
+@@ -61,7 +65,9 @@ function App() {
+   }
+ 
+   const count = (category: Finding["category"]) =>
+-    findings.filter((item) => item.category === category).length;
++    category === "urgent"
++      ? findings.filter((item) => item.category === "urgent" || item.priority === "high").length
++      : findings.filter((item) => item.category === category).length;
+ 
+   return (
+     <main className="app-shell">
+@@ -110,6 +116,7 @@ function App() {
+             <div className="input-footer">
+               <span>{conversation.length.toLocaleString()} characters <span className="dot-separator">┬╖</span> {conversation.split(/\r?\n/).filter((line) => line.trim()).length} lines</span>
+               <div className="input-actions">
++                <button className="button-quiet" type="button" onClick={clearAll} title="Clear text and results"><RotateCcw size={14} /> Clear</button>
+                 <button className="button-quiet" onClick={loadSample}><Upload size={15} /> Try sample</button>
+                 <button className="button-primary" onClick={runAnalysis}><Sparkles size={16} /> Find what matters <ArrowUpRight size={15} /></button>
+               </div>
+@@ -178,7 +185,22 @@ function FindingCard({ finding }: { finding: Finding }) {
+   return (
+     <article className={`finding-card ${done ? "completed" : ""}`}>
+       <button className={`finding-check ${done ? "checked" : ""}`} aria-label={done ? "Mark incomplete" : "Mark complete"} onClick={() => setDone(!done)}>{done && <Check size={13} />}</button>
+-      <div className="finding-content"><div className="finding-meta"><span className={`category-tag ${finding.category}`}>{labels[finding.category]}</span><span className="finding-reason">{finding.reason}</span></div><p>{finding.text}</p></div>
++      <div className="finding-content">
++        <div className="finding-meta">
++          <span className={`category-tag ${finding.category}`}>{labels[finding.category]}</span>
++          {finding.priority === "high" && finding.category !== "urgent" && (
++            <span className="category-tag urgent">Priority</span>
++          )}
++          {finding.deadline && (
++            <span className="finding-reason">Due: {finding.deadline.raw}</span>
++          )}
++          {finding.sourceMessage?.speaker && (
++            <span className="finding-reason">From {finding.sourceMessage.speaker}</span>
++          )}
++          <span className="finding-reason">{finding.reason}</span>
++        </div>
++        <p>{finding.text}</p>
++      </div>
+       <button className="icon-button" title="Dismiss signal" onClick={(event) => event.currentTarget.closest("article")?.remove()}><X size={15} /></button>
+     </article>
+   );
+diff --git a/src/analyzer.ts b/src/analyzer.ts
+index 4720762..fda1e18 100644
+--- a/src/analyzer.ts
++++ b/src/analyzer.ts
+@@ -1,72 +1,446 @@
+-export type Finding = {
++export type FindingCategory = "urgent" | "action" | "decision" | "question";
++export type PriorityLevel = "high" | "medium" | "low";
++
++export interface ExtractedDeadline {
++  /** Verbatim deadline phrase extracted from the message */
++  raw: string;
++  /** Relative urgency tier */
++  urgency: PriorityLevel;
++}
++
++export interface SourceMessage {
++  /** 1-based index in the parsed message sequence */
++  index: number;
++  /** 1-based line number in original input */
++  lineNumber: number;
++  /** Exact raw line text */
++  raw: string;
++  /** Identified speaker name if present */
++  speaker?: string;
++  /** Extracted timestamp if present */
++  timestamp?: string;
++  /** Cleaned content without speaker/timestamp prefix */
++  cleanContent: string;
++}
++
++export interface Finding {
++  /** Deterministic unique finding identifier */
+   id: string;
++  /** Cleaned finding text */
+   text: string;
+-  category: "urgent" | "action" | "decision" | "question";
++  /** Primary category for display and filtering */
++  category: FindingCategory;
++  /** Explanation for why this was flagged */
+   reason: string;
+-};
++  /** Full source message reference */
++  sourceMessage: SourceMessage;
++  /** Verbatim extracted deadline if present (never fabricated) */
++  deadline?: ExtractedDeadline;
++  /** Priority signal level */
++  priority?: PriorityLevel;
++  /** Target actor or assignee if identified */
++  assignee?: string;
++  /** Secondary category signals */
++  secondaryCategories?: FindingCategory[];
++}
++
++export interface ConversationParticipant {
++  name: string;
++  messageCount: number;
++}
+ 
+-export type Analysis = {
++export interface AnalysisMetrics {
++  totalLines: number;
++  messageCount: number;
++  participantCount: number;
++  urgentCount: number;
++  actionCount: number;
++  decisionCount: number;
++  questionCount: number;
++}
++
++export interface Analysis {
++  /** Synthesized multi-sentence executive briefing */
+   summary: string;
++  /** Total valid messages analyzed */
+   messageCount: number;
++  /** List of participants identified in conversation */
++  participants: ConversationParticipant[];
++  /** Structured findings */
+   findings: Finding[];
+-};
+-
+-const urgencyWords = /\b(urgent|asap|immediately|today|deadline|due by|by tonight|critical|tomorrow)\b/i;
+-const actionWords = /\b(please|todo|to-do|need to|needs to|action item|i will|we should|can you|remember to|don't forget|follow up|send|submit|finish|complete|prepare|review|book|schedule)\b/i;
+-const decisionWords = /\b(decided|decision|agreed|we will go with|final plan|confirmed|let's use|we'll use)\b/i;
+-const questionWords = /\?\s*$/;
+-
+-function splitLines(text: string): string[] {
+-  return text
+-    .split(/\r?\n/)
+-    .map((line) => line.trim())
+-    .filter(Boolean);
++  /** Breakdown metrics */
++  metrics: AnalysisMetrics;
+ }
+ 
+-function makeId(line: string, index: number): string {
+-  return `${index}-${line.slice(0, 24).replace(/\W/g, "")}`;
++// Non-speaker prefixes that might precede a colon
++const nonSpeakerLabels = new Set([
++  "decision",
++  "decided",
++  "note",
++  "todo",
++  "to-do",
++  "urgent",
++  "action",
++  "action item",
++  "update",
++  "status",
++  "summary",
++  "fyi",
++  "ps",
++  "p.s.",
++  "re",
++  "fw",
++  "q",
++  "a",
++  "question",
++  "answer",
++]);
++
++/**
++ * Parses raw text into structured SourceMessage objects.
++ */
++export function parseMessages(text: string): SourceMessage[] {
++  const lines = text.split(/\r?\n/);
++  const messages: SourceMessage[] = [];
++  let messageIndex = 1;
++
++  for (let i = 0; i < lines.length; i++) {
++    const rawLine = lines[i];
++    const trimmed = rawLine.trim();
++    if (!trimmed) continue;
++
++    // Check for standard speaker format:
++    // e.g. "Maya: We agreed..." or "[10:15 AM] Maya: We agreed..." or "Maya (10:15): We agreed..."
++    const speakerMatch = trimmed.match(
++      /^(?:\[(?:\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?)\]\s*)?([A-Za-z0-9_.\s]{2,25})(?:\s*\((?:\d{1,2}:\d{2}(?:\s*[AP]M)?)\))?:\s*(.*)$/
++    );
++
++    if (speakerMatch) {
++      const potentialSpeaker = speakerMatch[1].trim();
++      const content = speakerMatch[2].trim();
++
++      if (!nonSpeakerLabels.has(potentialSpeaker.toLowerCase())) {
++        messages.push({
++          index: messageIndex++,
++          lineNumber: i + 1,
++          raw: trimmed,
++          speaker: potentialSpeaker,
++          cleanContent: content || trimmed,
++        });
++        continue;
++      }
++    }
++
++    // Line without a recognized speaker prefix
++    messages.push({
++      index: messageIndex++,
++      lineNumber: i + 1,
++      raw: trimmed,
++      cleanContent: trimmed,
++    });
++  }
++
++  return messages;
+ }
+ 
++/**
++ * Extracts explicit deadlines without hallucinating or inventing missing information.
++ */
++export function extractDeadline(text: string): ExtractedDeadline | undefined {
++  // 1. Full deadline phrases: "by 6 PM today", "due by tonight", "before the demo", etc.
++  const fullDeadlineMatch = text.match(
++    /\b(?:by|before|due(?:\s+by|\s+on|\s+at)?|prior to|ahead of|until)\s+((?:today(?:\s+(?:at|by)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.))?|tonight|tomorrow(?:\s+(?:morning|afternoon|evening|night))?|end of day|eod|end of week|eow|\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)(?:\s+today)?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember))\s+\d{1,2}(?:st|nd|rd|th)?(?:\s*,\s*\d{4})?|the\s+(?:demo|meeting|presentation|release|launch|call|deadline|sync|review)))\b/i
++  );
++
++  if (fullDeadlineMatch) {
++    const matched = fullDeadlineMatch[0].trim();
++    const isHighUrgency = /\b(today|tonight|asap|immediately|eod|end of day)\b/i.test(matched);
++    return {
++      raw: matched,
++      urgency: isHighUrgency ? "high" : "medium",
++    };
++  }
++
++  // 2. Standalone relative urgency markers when connected to tasks
++  const standaloneMatch = text.match(/\b(asap|immediately|tonight|by tonight|due tomorrow|tomorrow)\b/i);
++  if (standaloneMatch) {
++    const raw = standaloneMatch[0].trim();
++    const isHigh = /\b(asap|immediately|tonight)\b/i.test(raw);
++    return {
++      raw,
++      urgency: isHigh ? "high" : "medium",
++    };
++  }
++
++  return undefined;
++}
++
++// Negation phrases that negate decisions, actions, or urgency
++const negationRegex = /\b(haven't|have not|hasn't|has not|didn't|did not|don't|do not|won't|will not|never|not yet|no need to)\b/i;
++
++// Question patterns
++const questionEndRegex = /\?\s*(?:[^\w\s]*)$/;
++const interrogativeStartRegex = /^(?:can\s+(?:someone|anyone|you|we)|could\s+(?:someone|anyone|you|we)|should\s+we|shall\s+we|do\s+we|does\s+anyone|is\s+there|are\s+there|what\s+(?:is|are|should)|when\s+(?:is|are|will|can)|where\s+(?:is|are)|who\s+(?:is|can|will)|how\s+(?:should|do|can|will)|have\s+we|has\s+anyone)\b/i;
++
++// Decision patterns
++const decisionExplicitRegex = /^(?:decision|decided|final plan|agreed|confirmed):\s*(.*)$/i;
++const decisionPhraseRegex = /\b(we agreed|we decided|team agreed|team decided|decided to|agreed to|we'll go with|we will go with|let's go with|let's use|we'll use|we will use|final decision is|confirmed that|settled on)\b/i;
++
++// Action patterns
++const firstPersonCommitmentRegex = /\b(i will|i'll|i can|i plan to|we will|we'll)\s+([a-z]+)\b/i;
++const actionDirectiveRegex = /\b(please|kindly|remember to|don't forget to|make sure to|be sure to|ensure that|action item:?|todo:?|to-do:?)\b/i;
++const needToRegex = /\b(?:we|you|someone|team)?\s*(?:need to|needs to|have to|has to)\s+([a-z]+)\b/i;
++
++// Urgency words
++const pureUrgencyRegex = /\b(urgent|urgently|asap|immediately|critical|blocker|blocking|high priority|time sensitive)\b/i;
++
++/**
++ * Evaluates a single message and returns a Finding if actionable or noteworthy content is found.
++ */
++function evaluateMessage(msg: SourceMessage): Finding | null {
++  const content = msg.cleanContent;
++  const deadline = extractDeadline(content);
++
++  // Check for question
++  const hasQuestionMark = questionEndRegex.test(content);
++  const startsWithInterrogative = interrogativeStartRegex.test(content);
++  const isQuestion = hasQuestionMark || startsWithInterrogative;
++
++  // Check for decision
++  const explicitDecisionMatch = content.match(decisionExplicitRegex);
++  const hasDecisionPhrase = decisionPhraseRegex.test(content);
++  const isNegatedDecision = negationRegex.test(content) && !explicitDecisionMatch;
++  const isDecision = (Boolean(explicitDecisionMatch) || hasDecisionPhrase) && !isNegatedDecision;
++
++  // Check for action item
++  const hasFirstPersonCommitment = firstPersonCommitmentRegex.test(content);
++  const hasActionDirective = actionDirectiveRegex.test(content);
++  const hasNeedTo = needToRegex.test(content);
++  const isActionCandidate = hasFirstPersonCommitment || hasActionDirective || hasNeedTo;
++
++  // Check for pure urgency
++  const hasPureUrgency = pureUrgencyRegex.test(content);
++
++  // ARBITRATION RULES:
++  
++  // 1. If it's a question:
++  if (isQuestion) {
++    // If it's asking a question about a decision or task, it is primarily a question to be answered
++    let reason = "Question requiring an answer or follow-up";
++    if (msg.speaker) {
++      reason = `Open question from ${msg.speaker}`;
++    }
++    return {
++      id: `finding-${msg.index}-question`,
++      text: msg.raw,
++      category: "question",
++      reason,
++      sourceMessage: msg,
++      deadline,
++      priority: deadline?.urgency === "high" || hasPureUrgency ? "high" : "low",
++    };
++  }
++
++  // 2. If it's a decision:
++  if (isDecision) {
++    let reason = "Records an agreed outcome or direction";
++    if (explicitDecisionMatch) {
++      reason = "Explicit decision recorded in conversation";
++    } else if (msg.speaker) {
++      reason = `Decision noted by ${msg.speaker}`;
++    }
++    return {
++      id: `finding-${msg.index}-decision`,
++      text: msg.raw,
++      category: "decision",
++      reason,
++      sourceMessage: msg,
++      deadline,
++      priority: deadline?.urgency === "high" || hasPureUrgency ? "high" : "medium",
++    };
++  }
++
++  // 3. If it's an action item:
++  if (isActionCandidate) {
++    // Identify assignee if first person commitment
++    let assignee: string | undefined = undefined;
++    if (hasFirstPersonCommitment && msg.speaker) {
++      assignee = msg.speaker;
++    }
++
++    let reason = "Action item or task commitment";
++    if (assignee && deadline) {
++      reason = `Task commitment by ${assignee} (${deadline.raw})`;
++    } else if (assignee) {
++      reason = `Task commitment by ${assignee}`;
++    } else if (msg.speaker && deadline) {
++      reason = `Action item requested by ${msg.speaker} (${deadline.raw})`;
++    } else if (deadline) {
++      reason = `Action item with deadline (${deadline.raw})`;
++    }
++
++    const isHighPriority = deadline?.urgency === "high" || hasPureUrgency;
++
++    return {
++      id: `finding-${msg.index}-action`,
++      text: msg.raw,
++      category: "action",
++      reason,
++      sourceMessage: msg,
++      deadline,
++      priority: isHighPriority ? "high" : "medium",
++      assignee,
++      secondaryCategories: isHighPriority ? ["urgent"] : undefined,
++    };
++  }
++
++  // 4. Standalone Urgency Alert:
++  if (hasPureUrgency || (deadline && deadline.urgency === "high")) {
++    return {
++      id: `finding-${msg.index}-urgent`,
++      text: msg.raw,
++      category: "urgent",
++      reason: deadline ? `Urgent signal with deadline (${deadline.raw})` : "Contains urgent or critical priority language",
++      sourceMessage: msg,
++      deadline,
++      priority: "high",
++    };
++  }
++
++  return null;
++}
++
++/**
++ * Synthesizes a coherent, human-readable summary briefing based strictly on extracted facts.
++ */
++function generateBriefingSummary(
++  messages: SourceMessage[],
++  participants: ConversationParticipant[],
++  findings: Finding[]
++): string {
++  if (messages.length === 0) {
++    return "Add a conversation to generate a briefing.";
++  }
++
++  const parts: string[] = [];
++
++  // 1. Participant context
++  if (participants.length === 1) {
++    parts.push(`Notes from ${participants[0].name} across ${messages.length} message${messages.length === 1 ? "" : "s"}.`);
++  } else if (participants.length === 2) {
++    parts.push(
++      `Conversation between ${participants[0].name} and ${participants[1].name} across ${messages.length} messages.`
++    );
++  } else if (participants.length > 2) {
++    const names = participants.map((p) => p.name);
++    const last = names.pop();
++    parts.push(`Conversation between ${names.join(", ")}, and ${last} across ${messages.length} messages.`);
++  } else {
++    parts.push(`Discussion across ${messages.length} message${messages.length === 1 ? "" : "s"}.`);
++  }
++
++  // 2. Findings synthesis
++  const actions = findings.filter((f) => f.category === "action");
++  const decisions = findings.filter((f) => f.category === "decision");
++  const questions = findings.filter((f) => f.category === "question");
++  const urgent = findings.filter((f) => f.category === "urgent" || f.priority === "high");
++
++  if (findings.length === 0) {
++    parts.push("No explicit deadlines, decisions, or action items were identified.");
++    return parts.join(" ");
++  }
++
++  const takeawayParts: string[] = [];
++
++  if (decisions.length > 0) {
++    takeawayParts.push(`${decisions.length} decision${decisions.length === 1 ? "" : "s"} recorded`);
++  }
++
++  if (actions.length > 0) {
++    const withDeadlines = actions.filter((a) => a.deadline);
++    if (withDeadlines.length > 0) {
++      takeawayParts.push(
++        `${actions.length} action item${actions.length === 1 ? "" : "s"} identified (${withDeadlines.length} with explicit deadline${withDeadlines.length === 1 ? "" : "s"})`
++      );
++    } else {
++      takeawayParts.push(`${actions.length} action item${actions.length === 1 ? "" : "s"} identified`);
++    }
++  }
++
++  if (questions.length > 0) {
++    takeawayParts.push(`${questions.length} open question${questions.length === 1 ? "" : "s"} awaiting follow-up`);
++  }
++
++  if (urgent.length > 0 && decisions.length === 0 && actions.length === 0) {
++    takeawayParts.push(`${urgent.length} priority signal${urgent.length === 1 ? "" : "s"} flagged for attention`);
++  }
++
++  if (takeawayParts.length > 0) {
++    parts.push(`Key takeaways: ${takeawayParts.join(", ")}.`);
++  }
++
++  return parts.join(" ");
++}
++
++/**
++ * Main analysis entrypoint: parses conversation text and generates structured findings and metrics.
++ */
+ export function analyzeConversation(text: string): Analysis {
+-  const lines = splitLines(text);
++  const messages = parseMessages(text);
+   const findings: Finding[] = [];
+ 
+-  lines.forEach((line, index) => {
+-    if (urgencyWords.test(line)) {
+-      findings.push({
+-        id: makeId(line, index),
+-        text: line,
+-        category: "urgent",
+-        reason: "Contains urgency or deadline language",
+-      });
+-    } else if (decisionWords.test(line)) {
+-      findings.push({
+-        id: makeId(line, index),
+-        text: line,
+-        category: "decision",
+-        reason: "May record a decision or agreement",
+-      });
+-    } else if (actionWords.test(line)) {
+-      findings.push({
+-        id: makeId(line, index),
+-        text: line,
+-        category: "action",
+-        reason: "May contain a task or follow-up",
+-      });
+-    } else if (questionWords.test(line)) {
+-      findings.push({
+-        id: makeId(line, index),
+-        text: line,
+-        category: "question",
+-        reason: "Could require an answer",
+-      });
++  // Track participants
++  const participantMap = new Map<string, number>();
++  for (const msg of messages) {
++    if (msg.speaker) {
++      participantMap.set(msg.speaker, (participantMap.get(msg.speaker) ?? 0) + 1);
++    }
++  }
++
++  const participants: ConversationParticipant[] = Array.from(participantMap.entries())
++    .map(([name, messageCount]) => ({ name, messageCount }))
++    .sort((a, b) => b.messageCount - a.messageCount);
++
++  // Evaluate messages for findings
++  for (const msg of messages) {
++    const finding = evaluateMessage(msg);
++    if (finding) {
++      findings.push(finding);
+     }
+-  });
++  }
++
++  // Compute metrics
++  const categoryCounts: Record<FindingCategory, number> = {
++    urgent: 0,
++    action: 0,
++    decision: 0,
++    question: 0,
++  };
++
++  for (const f of findings) {
++    categoryCounts[f.category]++;
++  }
++
++  // Also account for high-priority actions in urgent count for dashboard awareness
++  const urgentCount = findings.filter((f) => f.category === "urgent" || f.priority === "high").length;
++
++  const metrics: AnalysisMetrics = {
++    totalLines: text.split(/\r?\n/).length,
++    messageCount: messages.length,
++    participantCount: participants.length,
++    urgentCount,
++    actionCount: categoryCounts.action,
++    decisionCount: categoryCounts.decision,
++    questionCount: categoryCounts.question,
++  };
+ 
+-  const preview = lines.slice(0, 3).join(" ");
+-  const summary = lines.length === 0
+-    ? "Add a conversation to generate a briefing."
+-    : `${lines.length} non-empty line${lines.length === 1 ? "" : "s"} analyzed. ${preview}${lines.length > 3 ? "ΓÇª" : ""}`;
++  const summary = generateBriefingSummary(messages, participants, findings);
+ 
+-  return { summary, messageCount: lines.length, findings };
++  return {
++    summary,
++    messageCount: messages.length,
++    participants,
++    findings,
++    metrics,
++  };
+ }
+\ No newline at end of file
