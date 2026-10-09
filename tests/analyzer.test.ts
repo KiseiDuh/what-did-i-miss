@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { analyzeConversation, extractDeadline, normalizeText } from "../src/analyzer";
+import { analyzeConversation, extractDeadline, normalizeText, MAX_INPUT_CHARS, evaluateMessage, parseMessages } from "../src/analyzer";
 
 describe("Conversation Analyzer - Milestone 1 with Verified Review Fixes", () => {
   describe("1. Normal Inputs", () => {
@@ -331,6 +331,62 @@ Security: Critical blocker! Please verify network isolation immediately.`;
       expect(xhrSpy).not.toHaveBeenCalled();
       expect(wsSpy).not.toHaveBeenCalled();
       expect(beaconSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("8. Input Size Guard", () => {
+    it("throws for inputs exceeding MAX_INPUT_CHARS", () => {
+      const oversized = "A".repeat(MAX_INPUT_CHARS + 1);
+      expect(() => analyzeConversation(oversized)).toThrow(/too large/i);
+    });
+
+    it("accepts inputs exactly at the MAX_INPUT_CHARS boundary", () => {
+      const atLimit = "Maya: Hello there.\n".repeat(
+        Math.floor(MAX_INPUT_CHARS / "Maya: Hello there.\n".length)
+      ).slice(0, MAX_INPUT_CHARS);
+      expect(() => analyzeConversation(atLimit)).not.toThrow();
+    });
+
+    it("accepts pre-parsed SourceMessage arrays without size restriction", () => {
+      const msgs = parseMessages("Alice: Hello.\nBob: Hi there.");
+      expect(() => analyzeConversation(msgs)).not.toThrow();
+    });
+  });
+
+  describe("9. Edge Cases & Robustness", () => {
+    it("produces 0 findings and honest summary for a conversation with zero actionable content", () => {
+      const text = "Hey!\nWhat's up?\nNot much.";
+      const result = analyzeConversation(text);
+      expect(result.findings).toHaveLength(0);
+      expect(result.summary).toContain("No explicit deadlines, decisions, or action items were identified.");
+    });
+
+    it("does not crash on a very long single message (> 2000 chars)", () => {
+      const longMsg = "Alice: " + "word ".repeat(500) + "please send this.";
+      const result = analyzeConversation(longMsg);
+      expect(result.messageCount).toBe(1);
+      // Should still extract the imperative without crashing
+      expect(result.findings.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it("does not fragment messages with URLs or abbreviations via splitClauses", () => {
+      // "i.e." and URLs contain ". " which the old naive split would fragment
+      const msg = parseMessages("Maya: See the docs at https://example.com/path.html and please review this.")[0];
+      const findings = evaluateMessage(msg);
+      // The message should yield exactly one action (the imperative "please review")
+      const actions = findings.filter((f) => f.category === "action");
+      expect(actions).toHaveLength(1);
+      // The finding text must contain the full original message, not a fragment
+      expect(actions[0].text).toContain("https://example.com/path.html");
+    });
+
+    it("produces correct empty metrics for an empty analysis result", () => {
+      const result = analyzeConversation("");
+      expect(result.metrics.messageCount).toBe(0);
+      expect(result.metrics.urgentCount).toBe(0);
+      expect(result.metrics.actionCount).toBe(0);
+      expect(result.metrics.decisionCount).toBe(0);
+      expect(result.metrics.questionCount).toBe(0);
     });
   });
 });

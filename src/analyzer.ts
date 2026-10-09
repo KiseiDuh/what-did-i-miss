@@ -1,76 +1,31 @@
-export type FindingCategory = "urgent" | "action" | "decision" | "question";
-export type PriorityLevel = "high" | "medium" | "low";
+import type {
+  FindingCategory,
+  PriorityLevel,
+  ExtractedDeadline,
+  SourceMessage,
+  Finding,
+  ConversationParticipant,
+  AnalysisMetrics,
+  Analysis,
+} from "./types";
 
-export interface ExtractedDeadline {
-  /** Verbatim deadline phrase extracted from the message */
-  raw: string;
-  /** Relative urgency tier */
-  urgency: PriorityLevel;
-}
+// Re-export all types for backward compatibility
+export type {
+  FindingCategory,
+  PriorityLevel,
+  ExtractedDeadline,
+  SourceMessage,
+  Finding,
+  ConversationParticipant,
+  AnalysisMetrics,
+  Analysis,
+};
 
-export interface SourceMessage {
-  /** 1-based index in the parsed message sequence */
-  index: number;
-  /** 1-based line number in original input */
-  lineNumber: number;
-  /** Exact raw line text */
-  raw: string;
-  /** Identified speaker name if present */
-  speaker?: string;
-  /** Extracted timestamp if present */
-  timestamp?: string;
-  /** Cleaned content with speaker/timestamp prefixes stripped and quotes normalized */
-  cleanContent: string;
-}
-
-export interface Finding {
-  /** Deterministic unique finding identifier */
-  id: string;
-  /** Cleaned finding text or specific clause */
-  text: string;
-  /** Primary category for display and filtering */
-  category: FindingCategory;
-  /** Explanation for why this was flagged */
-  reason: string;
-  /** Full source message reference */
-  sourceMessage: SourceMessage;
-  /** Verbatim extracted deadline if present (never fabricated) */
-  deadline?: ExtractedDeadline;
-  /** Priority signal level */
-  priority?: PriorityLevel;
-  /** Target actor or assignee if identified */
-  assignee?: string;
-  /** Secondary category signals */
-  secondaryCategories?: FindingCategory[];
-}
-
-export interface ConversationParticipant {
-  name: string;
-  messageCount: number;
-}
-
-export interface AnalysisMetrics {
-  totalLines: number;
-  messageCount: number;
-  participantCount: number;
-  urgentCount: number;
-  actionCount: number;
-  decisionCount: number;
-  questionCount: number;
-}
-
-export interface Analysis {
-  /** Synthesized multi-sentence executive briefing */
-  summary: string;
-  /** Total valid messages analyzed */
-  messageCount: number;
-  /** List of participants identified in conversation */
-  participants: ConversationParticipant[];
-  /** Structured findings */
-  findings: Finding[];
-  /** Breakdown metrics */
-  metrics: AnalysisMetrics;
-}
+/**
+ * Maximum number of characters accepted for analysis.
+ * Inputs beyond this are rejected with a clear error to protect the main thread.
+ */
+export const MAX_INPUT_CHARS = 500_000;
 
 /**
  * Normalizes typographical apostrophes and quotation marks to straight ASCII characters.
@@ -162,7 +117,7 @@ export function extractDeadline(text: string, isActionContext = false): Extracte
 
   // 1. Explicit deadline prepositions: "by 6 PM today", "due by Friday", "before the demo", "until 5 PM", etc.
   const explicitPrepositionMatch = normalized.match(
-    /\b(?:by|before|due(?:\s+(?:by|on|at))?|prior to|ahead of|until|no later than|deadline(?:\s+is)?)\s+((?:today(?:\s+(?:at|by)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.))?|tonight|tomorrow(?:\s+(?:morning|afternoon|evening|night))?|end of day|eod|end of week|eow|\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)(?:\s+today)?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember))\s+\d{1,2}(?:st|nd|rd|th)?(?:\s*,\s*\d{4})?|the\s+(?:demo|meeting|presentation|release|launch|call|deadline|sync|review)))\b/i
+    /\b(?:by|before|due(?:\s+(?:by|on|at))?|prior to|ahead of|until|no later than|deadline(?:\s+is)?)[\s]+((?:today(?:\s+(?:at|by)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.))?|tonight|tomorrow(?:\s+(?:morning|afternoon|evening|night))?|end of day|eod|end of week|eow|\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)(?:\s+today)?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember))\s+\d{1,2}(?:st|nd|rd|th)?(?:\s*,\s*\d{4})?|the\s+(?:demo|meeting|presentation|release|launch|call|deadline|sync|review)))\b/i
   );
 
   if (explicitPrepositionMatch) {
@@ -222,9 +177,15 @@ const interrogativeStartRegex = /^(?:can\s+(?:someone|anyone|you|we)|could\s+(?:
 
 /**
  * Splits a compound message into clause candidates.
+ *
+ * Conservative approach: only splits on semicolons and explicit coordinating conjunctions
+ * (", and/so/also"). Does NOT split on ". " to avoid fragmenting abbreviations,
+ * URLs, or decimal numbers.
  */
 function splitClauses(text: string): string[] {
-  const parts = text.split(/(?:;|\.\s+|\n|,\s+(?:and|so|also)\s+)/i);
+  // Split only on semicolons or comma + coordinating conjunction
+  // Avoids splitting on ". " which breaks "i.e.", "e.g.", URLs, etc.
+  const parts = text.split(/(?:;|,\s+(?:and|so|also)\s+)/i);
   return parts.map((p) => p.trim()).filter(Boolean);
 }
 
@@ -453,8 +414,16 @@ function generateBriefingSummary(
 
 /**
  * Main analysis entrypoint: parses conversation text or pre-parsed messages and generates structured findings and metrics.
+ * Throws if the input exceeds MAX_INPUT_CHARS characters to protect the main thread.
  */
 export function analyzeConversation(input: string | SourceMessage[]): Analysis {
+  // Size guard: reject inputs that would freeze the main thread
+  if (typeof input === "string" && input.length > MAX_INPUT_CHARS) {
+    throw new Error(
+      `Input too large (${(input.length / 1000).toFixed(0)}k characters). Maximum is ${(MAX_INPUT_CHARS / 1000).toFixed(0)}k characters.`
+    );
+  }
+
   const messages = typeof input === "string" ? parseMessages(input) : input;
   const rawText = typeof input === "string" ? input : messages.map((m) => m.raw).join("\n");
   const findings: Finding[] = [];

@@ -5,6 +5,9 @@
 body{margin:0;min-width:320px;min-height:100vh}
 button,textarea{font:inherit}
 button{cursor:pointer}
+/* Skip link for keyboard accessibility */
+.skip-link{position:absolute;top:-100%;left:0;z-index:9999;padding:10px 16px;background:#a892ff;color:#10131c;font-weight:700;font-size:13px;border-radius:0 0 8px 8px;text-decoration:none;transition:top .1s}
+.skip-link:focus{top:0}
 .app-shell{min-height:100vh;display:flex;background:radial-gradient(ellipse at 70% 0%,rgba(92,82,180,.08),transparent 45%),#10131c}
 .sidebar{width:244px;flex-shrink:0;border-right:1px solid #252938;padding:26px 17px;display:flex;flex-direction:column;min-height:100vh;background:rgba(17,20,30,.92)}
 .brand{display:flex;align-items:center;gap:11px;padding:0 9px 40px}

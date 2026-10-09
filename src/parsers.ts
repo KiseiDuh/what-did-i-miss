@@ -1,4 +1,5 @@
-import { type SourceMessage, normalizeText } from "./analyzer";
+import { type SourceMessage } from "./types";
+import { normalizeText } from "./analyzer";
 
 export interface ParseResult {
   success: boolean;

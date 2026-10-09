@@ -5,7 +5,7 @@ import {
   RotateCcw, ShieldCheck, Sparkles, Upload, X, FileSpreadsheet, FileCode,
   File, Loader2, Info
 } from "lucide-react";
-import { analyzeConversation, type Finding, type SourceMessage } from "./analyzer";
+import { analyzeConversation, MAX_INPUT_CHARS, type Finding, type SourceMessage } from "./analyzer";
 import { parseContentAuto, type ParseResult } from "./parsers";
 
 const samplePlainText = `Maya: We agreed to use React and TypeScript for the prototype.
@@ -132,6 +132,14 @@ function App() {
       return;
     }
 
+    // Input size guard
+    if (trimmed.length > MAX_INPUT_CHARS) {
+      setError(`Input too large (${(trimmed.length / 1000).toFixed(0)}k characters). Maximum is ${(MAX_INPUT_CHARS / 1000).toFixed(0)}k characters.`);
+      setIsAnalyzed(false);
+      setSuccessNotice("");
+      return;
+    }
+
     setError("");
     setSuccessNotice("");
     setIsAnalyzing(true);
@@ -165,6 +173,13 @@ function App() {
     const ext = file.name.split(".").pop()?.toLowerCase();
     if (!ext || !["txt", "json", "csv"].includes(ext)) {
       setError(`Unsupported file format (.${ext || "unknown"}). Please upload a plain text (.txt), JSON (.json), or CSV (.csv) file.`);
+      return;
+    }
+
+    // 5 MB file size guard
+    const MAX_FILE_BYTES = 5 * 1024 * 1024;
+    if (file.size > MAX_FILE_BYTES) {
+      setError(`File too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Maximum upload size is 5 MB.`);
       return;
     }
 
@@ -266,7 +281,8 @@ function App() {
       : activeFindings.filter((item) => item.category === category).length;
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" id="main-content">
+      <a href="#main-content" className="skip-link">Skip to main content</a>
       <input
         type="file"
         ref={fileInputRef}
@@ -342,6 +358,7 @@ function App() {
                 onChange={(event) => handleTextareaChange(event.target.value)}
                 placeholder={"Paste your conversation here (or drag and drop a .txt, .json, or .csv file)...\n\nExample:\nMaya: We agreed to use React for the prototype.\nRohan: I will prepare the first dashboard draft tonight.\nMaya: Please send the slides by 6 PM today."}
                 aria-label="Conversation text"
+                aria-describedby="input-stats"
               />
             </div>
 
@@ -360,11 +377,11 @@ function App() {
             )}
 
             <div className="input-footer">
-              <span>
+              <span id="input-stats" aria-live="polite" aria-atomic="true">
                 {conversation.length.toLocaleString()} characters <span className="dot-separator">·</span> {currentMessageCount} message{currentMessageCount === 1 ? "" : "s"} ({currentLineCount} line{currentLineCount === 1 ? "" : "s"})
               </span>
               <div className="input-actions">
-                <button className="button-quiet" type="button" onClick={clearAll} title="Clear text and results">
+                <button className="button-quiet" type="button" onClick={clearAll} title="Clear text and results" aria-label="Clear">
                   <RotateCcw size={14} /> Clear
                 </button>
                 <button className="button-quiet" type="button" onClick={() => fileInputRef.current?.click()} title="Upload TXT, JSON, or CSV">
@@ -375,6 +392,8 @@ function App() {
                   type="button"
                   onClick={() => setShowFormatGuide(!showFormatGuide)}
                   title="View format examples"
+                  aria-expanded={showFormatGuide}
+                  aria-controls="format-guide-panel"
                 >
                   <FileText size={14} /> {showFormatGuide ? "Hide templates" : "Sample templates"}
                 </button>
@@ -398,7 +417,7 @@ function App() {
             </div>
 
             {showFormatGuide && (
-              <section className="format-guide" aria-label="Supported file formats">
+              <section id="format-guide-panel" className="format-guide" aria-label="Supported file formats">
                 <div className="format-guide-header" onClick={() => setShowFormatGuide(false)}>
                   <span><Info size={14} style={{ verticalAlign: "middle", marginRight: 6 }} /> Supported formats (TXT, JSON, CSV)</span>
                   <ChevronUp size={14} />
@@ -452,7 +471,7 @@ function App() {
                 <span className="result-count">{activeFindings.length} found</span>
               </div>
 
-              <div className="filter-row">
+              <div className="filter-row" role="group" aria-label="Filter findings by category">
                 {[
                   ["all", "All signals"], ["urgent", "Priority"], ["action", "Action items"],
                   ["decision", "Decisions"], ["question", "Questions"],
@@ -462,13 +481,14 @@ function App() {
                     type="button"
                     className={`filter-chip ${activeFilter === value ? "selected" : ""}`}
                     onClick={() => setActiveFilter(value)}
+                    aria-pressed={activeFilter === value}
                   >
                     {label}
                   </button>
                 ))}
               </div>
 
-              <div className="findings-list">
+              <div className="findings-list" aria-live="polite" aria-label="Analysis findings">
                 {filtered.length ? (
                   filtered.map((finding) => (
                     <FindingCard
